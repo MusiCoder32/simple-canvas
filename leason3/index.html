@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leason 3 - DPR 适配（高清画布）</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+    canvas { width: 920px; max-width: 100%; height: 520px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 92%, CanvasText 8%); display: block; }
+    .panel { max-width: 720px; line-height: 1.7; }
+    code { background: color-mix(in srgb, CanvasText 12%, transparent); padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Leason 3：DPR 适配（在高分屏上画清晰）</h1>
+  <p class="panel">
+    现象：同样的 Canvas 代码在 Retina/高分屏上会变“糊”。
+    原因：Canvas 的 <code>width/height</code> 是“像素缓冲区大小”（backing store），而 CSS 的宽高是“显示大小”（layout size）。
+    当 <code>devicePixelRatio &gt; 1</code> 时，如果 backing store 没按 DPR 放大，你等于把低分辨率位图拉伸显示。
+  </p>
+
+  <div class="row">
+    <canvas id="c"></canvas>
+    <div class="panel">
+      <h3>本课要点</h3>
+      <ul>
+        <li>把 Canvas 当作“位图”：需要用 DPR 放大像素缓冲区。</li>
+        <li>把 ctx 坐标系缩放回“CSS 像素”：<code>ctx.setTransform(dpr,0,0,dpr,0,0)</code>。</li>
+        <li>鼠标坐标映射：事件的 <code>clientX/clientY</code> 属于 CSS 像素，要映射到你的绘制坐标。</li>
+        <li>窗口缩放/缩放比变化：需要重新设置尺寸与变换。</li>
+      </ul>
+      <p>
+        试试：在不同缩放比下观察网格线与 1px 线条是否清晰。
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.querySelector('#c');
+    const ctx = canvas.getContext('2d');
+
+    // 你希望“视觉上”的大小（CSS 像素）
+    const CSS_W = 920;
+    const CSS_H = 520;
+
+    // 当前 dpr：CSS 像素到物理像素的倍率
+    function getDpr() {
+      // 有些浏览器还提供了 backingStorePixelRatio（旧时代），现代场景通常只看 devicePixelRatio
+      return Math.max(1, window.devicePixelRatio || 1);
+    }
+
+    /**
+     * 核心：设置高清画布
+     * - canvas.style.width/height：页面布局尺寸（CSS 像素）
+     * - canvas.width/height：实际像素缓冲区尺寸（设备像素）
+     * - ctx.setTransform(dpr,0,0,dpr,0,0)：把绘图坐标系“缩放回”CSS 像素
+     *
+     * 注意：
+     * - 不要用 ctx.scale(dpr,dpr) 叠加缩放（会重复乘），更推荐每次 reset 后 setTransform
+     * - 每次改 canvas.width/height 会清空画布，并重置 ctx 状态（包括 transform）
+     */
+    function setupHiDPICanvas() {
+      const dpr = getDpr();
+
+      canvas.style.width = CSS_W + 'px';
+      canvas.style.height = CSS_H + 'px';
+
+      canvas.width = Math.round(CSS_W * dpr);
+      canvas.height = Math.round(CSS_H * dpr);
+
+      // 让“1 个绘制单位”对应“1 个 CSS 像素”
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      return dpr;
+    }
+
+    function drawScene(dpr) {
+      // 清空：注意这里用 CSS 坐标清空即可，因为 transform 已经把单位映射为 CSS 像素
+      ctx.clearRect(0, 0, CSS_W, CSS_H);
+
+      // 背景
+      ctx.fillStyle = 'rgba(0,0,0,0.15)';
+      ctx.fillRect(0, 0, CSS_W, CSS_H);
+
+      // 画网格（对比线条清晰度）
+      ctx.lineWidth = 1; // 这里的 1 是“CSS 像素宽度”
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      for (let x = 0; x <= CSS_W; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0); // +0.5 让 1px 线落在像素中心（可减少锯齿）
+        ctx.lineTo(x + 0.5, CSS_H);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= CSS_H; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(CSS_W, y + 0.5);
+        ctx.stroke();
+      }
+
+      // 对比：同样的圆和文字在不同 dpr 下都应该“看起来”一致
+      ctx.fillStyle = '#60a5fa';
+      ctx.beginPath();
+      ctx.arc(160, 140, 50, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = '700 26px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      ctx.fillText(`devicePixelRatio = ${dpr.toFixed(2)}`, 240, 150);
+
+      // 右下角说明
+      ctx.font = '14px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.fillText('移动鼠标：查看坐标映射', 16, CSS_H - 16);
+    }
+
+    // --- 坐标映射：把鼠标事件映射到“绘制坐标（CSS 像素）” ---
+    function getCanvasPointFromMouseEvent(e) {
+      const rect = canvas.getBoundingClientRect();
+      // clientX/clientY：相对视口的 CSS 像素坐标
+      // rect.left/top：canvas 在视口中的位置（CSS 像素）
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      // 因为我们把绘制坐标系设置成 CSS 像素，所以这里直接返回即可。
+      // 如果你没做 setTransform(dpr...)，那你需要再乘 dpr。
+      return { x, y };
+    }
+
+    let currentDpr = setupHiDPICanvas();
+    drawScene(currentDpr);
+
+    canvas.addEventListener('mousemove', (e) => {
+      const p = getCanvasPointFromMouseEvent(e);
+
+      // 为了不在 mousemove 中整屏重绘，这里用一个小 overlay 方案：
+      // 1) 重新画背景（简单示例里直接重画全屏；实际项目更建议做分层/脏矩形/离屏缓存）
+      drawScene(currentDpr);
+
+      // 2) 画十字光标
+      ctx.strokeStyle = 'rgba(244,114,182,0.95)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(p.x - 12, p.y + 0.5);
+      ctx.lineTo(p.x + 12, p.y + 0.5);
+      ctx.moveTo(p.x + 0.5, p.y - 12);
+      ctx.lineTo(p.x + 0.5, p.y + 12);
+      ctx.stroke();
+
+      // 3) 坐标文本
+      ctx.font = '12px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillText(`(${p.x.toFixed(1)}, ${p.y.toFixed(1)}) CSS px`, p.x + 14, p.y - 10);
+    });
+
+    // 当窗口缩放、页面缩放导致 dpr 变化时需要重建
+    // 这里用 resize 简化处理：实际项目可用 matchMedia 监听 dpr 变化
+    window.addEventListener('resize', () => {
+      const next = setupHiDPICanvas();
+      currentDpr = next;
+      drawScene(currentDpr);
+    });
+  </script>
+</body>
+</html>

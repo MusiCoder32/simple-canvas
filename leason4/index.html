@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leason 4 - 命中测试 / 坐标映射</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    canvas { width: 920px; max-width: 100%; height: 520px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 92%, CanvasText 8%); display: block; }
+    .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: flex-start; }
+    .panel { max-width: 720px; line-height: 1.7; }
+    .hint { opacity: 0.9; font-size: 14px; }
+    code { background: color-mix(in srgb, CanvasText 12%, transparent); padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Leason 4：命中测试（Hit Test）+ 坐标映射</h1>
+  <p class="panel">
+    Canvas 是“立即模式”绘制：画完就只剩像素，没有 DOM 节点可点。
+    所以交互需要我们自己做命中测试：把鼠标点映射到画布坐标，再判断它是否落在某个形状上。
+  </p>
+
+  <div class="row">
+    <canvas id="c"></canvas>
+    <div class="panel">
+      <h3>本课要点</h3>
+      <ul>
+        <li>坐标映射：<code>clientX/clientY</code> → <code>canvas</code> 局部坐标（CSS 像素）。</li>
+        <li>命中测试：<code>ctx.isPointInPath(path, x, y)</code> 与 <code>ctx.isPointInStroke(path, x, y)</code>。</li>
+        <li>拖拽：命中后记录 offset，让物体跟随鼠标移动。</li>
+        <li>DPR：本课已做 HiDPI 适配，因此绘制坐标就是 CSS 像素。</li>
+      </ul>
+      <p class="hint">操作：移动鼠标看高亮，按住拖拽形状。</p>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.querySelector('#c');
+    const ctx = canvas.getContext('2d');
+
+    const CSS_W = 920;
+    const CSS_H = 520;
+
+    function getDpr() {
+      return Math.max(1, window.devicePixelRatio || 1);
+    }
+
+    function setupHiDPICanvas() {
+      const dpr = getDpr();
+      canvas.style.width = CSS_W + 'px';
+      canvas.style.height = CSS_H + 'px';
+      canvas.width = Math.round(CSS_W * dpr);
+      canvas.height = Math.round(CSS_H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return dpr;
+    }
+
+    function getCanvasPoint(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
+    }
+
+    // --- 场景对象（“保留模式”数据结构）---
+    // Canvas 本身不保存对象，我们要自己保存。
+    // 最常见做法：维护一个 objects 数组，每帧根据对象状态重绘。
+    const objects = [
+      { id: 'rect1', type: 'roundRect', x: 120, y: 110, w: 240, h: 140, r: 18, fill: 'rgba(96,165,250,0.22)', stroke: '#60a5fa' },
+      { id: 'circle1', type: 'circle', x: 520, y: 185, r: 70, fill: 'rgba(52,211,153,0.20)', stroke: '#34d399' },
+      { id: 'rect2', type: 'roundRect', x: 610, y: 290, w: 220, h: 140, r: 26, fill: 'rgba(244,114,182,0.20)', stroke: '#f472b6' },
+    ];
+
+    // 每个对象都可以用 Path2D 表达几何形状，用于绘制与 hit test。
+    function buildPath(obj) {
+      const p = new Path2D();
+      if (obj.type === 'circle') {
+        p.arc(obj.x, obj.y, obj.r, 0, Math.PI * 2);
+      } else if (obj.type === 'roundRect') {
+        // Path2D 没有 roundRect 方法，我们自己拼：
+        const r = Math.min(obj.r, obj.w / 2, obj.h / 2);
+        const x = obj.x;
+        const y = obj.y;
+        const w = obj.w;
+        const h = obj.h;
+
+        p.moveTo(x + r, y);
+        p.lineTo(x + w - r, y);
+        p.arcTo(x + w, y, x + w, y + r, r);
+        p.lineTo(x + w, y + h - r);
+        p.arcTo(x + w, y + h, x + w - r, y + h, r);
+        p.lineTo(x + r, y + h);
+        p.arcTo(x, y + h, x, y + h - r, r);
+        p.lineTo(x, y + r);
+        p.arcTo(x, y, x + r, y, r);
+        p.closePath();
+      }
+      return p;
+    }
+
+    // --- 命中测试：从上到下（后画的在上面）找第一个命中 ---
+    function hitTest(point) {
+      for (let i = objects.length - 1; i >= 0; i--) {
+        const obj = objects[i];
+        const path = buildPath(obj);
+
+        // 1) isPointInPath：判断点是否在填充区域
+        if (ctx.isPointInPath(path, point.x, point.y)) {
+          return { obj, part: 'fill' };
+        }
+
+        // 2) isPointInStroke：判断点是否落在描边上（适合细线选择）
+        ctx.save();
+        ctx.lineWidth = 10; // 用较粗的“可点区域”，提升可用性
+        const onStroke = ctx.isPointInStroke(path, point.x, point.y);
+        ctx.restore();
+        if (onStroke) {
+          return { obj, part: 'stroke' };
+        }
+      }
+      return null;
+    }
+
+    let hover = null; // {obj, part}
+    let dragging = null; // {obj, offsetX, offsetY}
+
+    function drawBackgroundGrid() {
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.12)';
+      ctx.fillRect(0, 0, CSS_W, CSS_H);
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      for (let x = 0; x <= CSS_W; x += 40) {
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, CSS_H);
+        ctx.stroke();
+      }
+      for (let y = 0; y <= CSS_H; y += 40) {
+        ctx.beginPath();
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(CSS_W, y + 0.5);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, CSS_W, CSS_H);
+      drawBackgroundGrid();
+
+      // 逐个对象绘制
+      for (const obj of objects) {
+        const path = buildPath(obj);
+
+        ctx.save();
+        ctx.fillStyle = obj.fill;
+        ctx.strokeStyle = obj.stroke;
+        ctx.lineWidth = 4;
+        ctx.lineJoin = 'round';
+        ctx.fill(path);
+        ctx.stroke(path);
+
+        // 悬停高亮
+        if (hover && hover.obj === obj) {
+          ctx.save();
+          ctx.lineWidth = 6;
+          ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+          ctx.setLineDash([8, 6]);
+          ctx.stroke(path);
+          ctx.restore();
+        }
+
+        ctx.restore();
+      }
+
+      // HUD
+      ctx.save();
+      ctx.font = '14px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      const hoverText = hover ? `hover: ${hover.obj.id} (${hover.part})` : 'hover: (none)';
+      const dragText = dragging ? `dragging: ${dragging.obj.id}` : 'dragging: (none)';
+      ctx.fillText(hoverText, 16, 22);
+      ctx.fillText(dragText, 16, 44);
+      ctx.fillText('提示：命中测试用 Path2D + isPointInPath/isPointInStroke', 16, CSS_H - 16);
+      ctx.restore();
+    }
+
+    // --- 交互 ---
+    canvas.addEventListener('mousemove', (e) => {
+      const p = getCanvasPoint(e);
+
+      if (dragging) {
+        // 拖拽时更新位置
+        const obj = dragging.obj;
+        if (obj.type === 'circle') {
+          obj.x = p.x - dragging.offsetX;
+          obj.y = p.y - dragging.offsetY;
+        } else {
+          obj.x = p.x - dragging.offsetX;
+          obj.y = p.y - dragging.offsetY;
+        }
+        draw();
+        return;
+      }
+
+      hover = hitTest(p);
+      draw();
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+      const p = getCanvasPoint(e);
+      const hit = hitTest(p);
+      if (!hit) return;
+
+      // 让命中的对象置顶：把它移动到数组末尾（后画的在上）
+      const idx = objects.indexOf(hit.obj);
+      if (idx >= 0) {
+        objects.splice(idx, 1);
+        objects.push(hit.obj);
+      }
+
+      // 记录 offset：让拖拽时“抓住点”保持在鼠标下
+      const obj = hit.obj;
+      if (obj.type === 'circle') {
+        dragging = { obj, offsetX: p.x - obj.x, offsetY: p.y - obj.y };
+      } else {
+        dragging = { obj, offsetX: p.x - obj.x, offsetY: p.y - obj.y };
+      }
+
+      draw();
+    });
+
+    window.addEventListener('mouseup', () => {
+      dragging = null;
+      draw();
+    });
+
+    // --- 启动 ---
+    setupHiDPICanvas();
+    draw();
+
+    window.addEventListener('resize', () => {
+      setupHiDPICanvas();
+      draw();
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leason 6 - 性能优化与离屏渲染</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    canvas { width: 920px; max-width: 100%; height: 520px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 92%, CanvasText 8%); display: block; }
+    .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0 12px; }
+    label { display: inline-flex; gap: 8px; align-items: center; font-size: 14px; opacity: 0.95; }
+    input[type="range"] { width: 220px; }
+    button { padding: 8px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); background: color-mix(in srgb, Canvas 95%, CanvasText 5%); color: CanvasText; cursor: pointer; }
+    code { background: color-mix(in srgb, CanvasText 12%, transparent); padding: 2px 6px; border-radius: 6px; }
+    .note { max-width: 920px; line-height: 1.7; opacity: 0.95; }
+  </style>
+</head>
+<body>
+  <h1>Leason 6：性能优化 + 离屏（Offscreen / 缓存）</h1>
+  <p class="note">
+    Canvas 性能瓶颈通常在“每帧要做多少次 draw 调用、做多少状态切换、以及是否反复做昂贵路径计算”。
+    本课用一个粒子例子对比：
+    <b>朴素画圆（arc）</b> vs <b>离屏预渲染精灵（offscreen sprite）</b>。
+  </p>
+
+  <div class="bar">
+    <label>粒子数 <input id="rng" type="range" min="500" max="20000" step="500" value="6000" /> <span id="count">6000</span></label>
+    <label><input id="chk-sprite" type="checkbox" checked /> 使用离屏精灵缓存（推荐）</label>
+    <label><input id="chk-trails" type="checkbox" /> 拖尾（更耗性能）</label>
+    <button id="btn-reset">重置</button>
+    <span id="stat" style="font-size:14px; opacity:0.95;"></span>
+  </div>
+
+  <canvas id="c"></canvas>
+
+  <script>
+    const canvas = document.querySelector('#c');
+    const ctx = canvas.getContext('2d');
+
+    const rng = document.querySelector('#rng');
+    const countEl = document.querySelector('#count');
+    const chkSprite = document.querySelector('#chk-sprite');
+    const chkTrails = document.querySelector('#chk-trails');
+    const btnReset = document.querySelector('#btn-reset');
+    const statEl = document.querySelector('#stat');
+
+    const CSS_W = 920;
+    const CSS_H = 520;
+
+    function getDpr() { return Math.max(1, window.devicePixelRatio || 1); }
+
+    function setupHiDPICanvas() {
+      const dpr = getDpr();
+      canvas.style.width = CSS_W + 'px';
+      canvas.style.height = CSS_H + 'px';
+      canvas.width = Math.round(CSS_W * dpr);
+      canvas.height = Math.round(CSS_H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return dpr;
+    }
+
+    // --- 离屏缓存：创建一个“精灵图” ---
+    // 思路：昂贵的绘制（渐变、复杂路径）只画一次到离屏 canvas；
+    // 每帧只做 drawImage，显著减少 CPU 计算与路径栈操作。
+    function createParticleSprite(size = 48) {
+      // OffscreenCanvas：可在 Worker 中渲染；主线程也可用（支持与否看浏览器）。
+      // 这里做降级：不支持就用普通 <canvas> 当“离屏 canvas”。
+      const offscreen = (typeof OffscreenCanvas !== 'undefined')
+        ? new OffscreenCanvas(size, size)
+        : Object.assign(document.createElement('canvas'), { width: size, height: size });
+
+      const octx = offscreen.getContext('2d');
+
+      // 一个带柔和边缘的发光点
+      const r = size / 2;
+      const g = octx.createRadialGradient(r, r, 0, r, r, r);
+      g.addColorStop(0, 'rgba(96,165,250,0.95)');
+      g.addColorStop(0.45, 'rgba(96,165,250,0.45)');
+      g.addColorStop(1, 'rgba(96,165,250,0.0)');
+
+      octx.clearRect(0, 0, size, size);
+      octx.fillStyle = g;
+      octx.beginPath();
+      octx.arc(r, r, r, 0, Math.PI * 2);
+      octx.fill();
+
+      return offscreen;
+    }
+
+    const sprite = createParticleSprite(48);
+
+    // --- 粒子数据 ---
+    // 性能提示：频繁创建对象会触发 GC；真实项目可以用 TypedArray / 对象池。
+    let particles = [];
+
+    function random(min, max) {
+      return min + Math.random() * (max - min);
+    }
+
+    function resetParticles(n) {
+      particles = new Array(n);
+      for (let i = 0; i < n; i++) {
+        particles[i] = {
+          x: random(0, CSS_W),
+          y: random(0, CSS_H),
+          vx: random(-90, 90),
+          vy: random(-90, 90),
+          r: random(2.2, 4.6)
+        };
+      }
+    }
+
+    function step(dt) {
+      for (const p of particles) {
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+
+        // 边界反弹
+        if (p.x < 0) { p.x = 0; p.vx = Math.abs(p.vx); }
+        if (p.x > CSS_W) { p.x = CSS_W; p.vx = -Math.abs(p.vx); }
+        if (p.y < 0) { p.y = 0; p.vy = Math.abs(p.vy); }
+        if (p.y > CSS_H) { p.y = CSS_H; p.vy = -Math.abs(p.vy); }
+      }
+    }
+
+    function render() {
+      if (!chkTrails.checked) {
+        ctx.clearRect(0, 0, CSS_W, CSS_H);
+      } else {
+        // 拖尾：不清屏，而是用半透明黑覆盖；效果酷，但更吃 fillRect 带宽
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.10)';
+        ctx.fillRect(0, 0, CSS_W, CSS_H);
+        ctx.restore();
+      }
+
+      if (chkSprite.checked) {
+        // 优化路径：只做 drawImage
+        // 进一步优化：尽量减少 ctx 属性修改（例如 globalAlpha / compositeOperation 等）
+        for (const p of particles) {
+          const s = p.r * 10; // 用半径控制精灵显示大小
+          ctx.drawImage(sprite, p.x - s / 2, p.y - s / 2, s, s);
+        }
+      } else {
+        // 朴素路径：每个粒子都 arc + fill（会频繁 beginPath/arc/fill）
+        ctx.save();
+        ctx.fillStyle = 'rgba(96,165,250,0.7)';
+        for (const p of particles) {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      // HUD
+      ctx.save();
+      ctx.font = '14px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(`粒子：${particles.length} | 渲染：${chkSprite.checked ? '离屏精灵 drawImage' : 'arc+fill'} | 拖尾：${chkTrails.checked ? 'on' : 'off'}`, 16, 22);
+      ctx.restore();
+    }
+
+    // --- 主循环：rAF + delta time（本课专注性能，不做 fixed timestep） ---
+    let lastTs = performance.now();
+    const fps = { lastUpdate: performance.now(), frames: 0, value: 0 };
+
+    function tick(nowTs) {
+      const dt = Math.min(0.033, (nowTs - lastTs) / 1000); // cap dt，避免卡顿时跳跃过大
+      lastTs = nowTs;
+
+      step(dt);
+      render();
+
+      fps.frames++;
+      const elapsed = nowTs - fps.lastUpdate;
+      if (elapsed >= 500) {
+        fps.value = (fps.frames / elapsed) * 1000;
+        fps.frames = 0;
+        fps.lastUpdate = nowTs;
+      }
+
+      // 粗略统计：真实分析请用 DevTools Performance
+      statEl.textContent = `FPS ~ ${fps.value.toFixed(0)} | dt=${(dt * 1000).toFixed(1)}ms`;
+
+      requestAnimationFrame(tick);
+    }
+
+    // --- 控件 ---
+    function syncCountLabel() {
+      countEl.textContent = String(rng.value);
+    }
+
+    rng.addEventListener('input', () => {
+      syncCountLabel();
+      resetParticles(Number(rng.value));
+    });
+
+    btnReset.addEventListener('click', () => {
+      resetParticles(Number(rng.value));
+    });
+
+    // --- 启动 ---
+    setupHiDPICanvas();
+    syncCountLabel();
+    resetParticles(Number(rng.value));
+    requestAnimationFrame(tick);
+
+    window.addEventListener('resize', () => {
+      setupHiDPICanvas();
+    });
+  </script>
+
+  <p class="note">
+    额外知识点（建议对照浏览器 Performance/Memory 面板观察）：
+    <br />1) 减少每帧绘制调用次数（批处理、精灵缓存、合并路径）。
+    <br />2) 减少状态切换（fillStyle/font/globalAlpha/composite 等都可能触发内部 flush）。
+    <br />3) 避免每帧创建大量临时对象（会触发 GC 卡顿）。
+    <br />4) 需要更大规模时：考虑 <code>OffscreenCanvas + Worker</code>（把渲染移到线程外）。
+  </p>
+</body>
+</html>

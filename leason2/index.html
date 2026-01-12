@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leason 2 - 动画 + rAF + 时间步进</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    canvas { width: 920px; max-width: 100%; height: 520px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 92%, CanvasText 8%); display: block; }
+    .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0 18px; }
+    button { padding: 8px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); background: color-mix(in srgb, Canvas 95%, CanvasText 5%); color: CanvasText; cursor: pointer; }
+    .stat { opacity: 0.9; font-size: 14px; }
+    code { background: color-mix(in srgb, CanvasText 12%, transparent); padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Leason 2：动画（requestAnimationFrame + 时间步进）</h1>
+  <p>
+    本课讲“动画的工程化写法”：为什么要用 <code>requestAnimationFrame</code>、如何计算 <code>deltaTime</code>、
+    以及固定时间步（fixed timestep）避免不同帧率导致的物理不一致。
+  </p>
+
+  <div class="bar">
+    <button id="btn-toggle">暂停</button>
+    <button id="btn-reset">重置</button>
+    <label class="stat"><input id="chk-fixed" type="checkbox" checked /> 使用 fixed timestep（推荐）</label>
+    <span class="stat" id="stat"></span>
+  </div>
+
+  <canvas id="c" width="920" height="520"></canvas>
+
+  <script>
+    /**
+     * requestAnimationFrame（rAF）为什么更适合做动画？
+     * - 跟随浏览器刷新节奏（通常 60Hz/120Hz），更省电、也更平滑
+     * - 标签页不可见时会自动降频/暂停，避免后台空跑
+     * - 回调参数提供一个高精度时间戳（DOMHighResTimeStamp）
+     *
+     * deltaTime（dt）是什么？
+     * - dt = 当前帧时间 - 上一帧时间（单位：秒）
+     * - 用 dt 来推进运动：position += velocity * dt
+     * - 这样无论 30fps/60fps/144fps，单位时间内移动距离一致
+     *
+     * 为什么还要 fixed timestep？
+     * - “可变 dt” 在帧率抖动时会导致物理不稳定（碰撞穿透、弹跳不一致、积分误差累积）
+     * - fixed timestep 把模拟拆成固定步长（比如 1/120s），渲染仍跟随 rAF
+     */
+
+    const canvas = document.querySelector('#c');
+    const ctx = canvas.getContext('2d');
+
+    const btnToggle = document.querySelector('#btn-toggle');
+    const btnReset = document.querySelector('#btn-reset');
+    const chkFixed = document.querySelector('#chk-fixed');
+    const statEl = document.querySelector('#stat');
+
+    // --- 场景参数 ---
+    const world = {
+      gravity: 1200,          // 重力加速度：px/s^2
+      groundY: canvas.height - 60,
+      restitution: 0.75,      // 弹性系数（0~1）
+      friction: 0.98,         // 水平摩擦（每步衰减）
+    };
+
+    // --- 一个会弹跳的小球（用来观察 dt 影响） ---
+    const ball = {
+      x: 140,
+      y: 120,
+      r: 22,
+      vx: 420,                // px/s
+      vy: 0,
+      color: '#60a5fa'
+    };
+
+    // --- 时间管理 ---
+    let running = true;
+    let lastTs = performance.now();
+
+    // fixed timestep 相关
+    const fixedDt = 1 / 120;          // 模拟步长：1/120 秒
+    const maxFrameDt = 0.05;          // 防止“切后台回来”时 dt 巨大（例如 2s）
+    let accumulator = 0;
+
+    // FPS 统计（滑动平均）
+    const fps = {
+      lastUpdate: performance.now(),
+      frames: 0,
+      value: 0
+    };
+
+    function reset() {
+      ball.x = 140;
+      ball.y = 120;
+      ball.vx = 420;
+      ball.vy = 0;
+      accumulator = 0;
+      lastTs = performance.now();
+    }
+
+    function stepPhysics(dt) {
+      // dt 是“模拟步长”（秒），不关心渲染帧率
+
+      // 1) 施加重力：v = v + a * dt
+      ball.vy += world.gravity * dt;
+
+      // 2) 移动：p = p + v * dt
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+
+      // 3) 边界碰撞
+      // 地面
+      if (ball.y + ball.r > world.groundY) {
+        ball.y = world.groundY - ball.r;
+        ball.vy = -ball.vy * world.restitution;
+        ball.vx *= world.friction;
+      }
+
+      // 左右墙
+      if (ball.x - ball.r < 40) {
+        ball.x = 40 + ball.r;
+        ball.vx = Math.abs(ball.vx);
+      }
+      if (ball.x + ball.r > canvas.width - 40) {
+        ball.x = canvas.width - 40 - ball.r;
+        ball.vx = -Math.abs(ball.vx);
+      }
+    }
+
+    function render(alphaForInterpolation) {
+      // 这里 alpha 的意义：当使用 fixed timestep 时，accumulator 里可能剩一点时间；
+      // 你可以用 alpha 做“插值渲染”（本例为了简化不做双状态插值，只展示概念）。
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 地面
+      ctx.save();
+      ctx.fillStyle = 'rgba(52,211,153,0.15)';
+      ctx.strokeStyle = 'rgba(52,211,153,0.7)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(40, world.groundY, canvas.width - 80, 26, 10);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // 球
+      ctx.save();
+      ctx.fillStyle = ball.color;
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 一个小高光，让它更像“球”
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(ball.x - ball.r * 0.35, ball.y - ball.r * 0.35, ball.r * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // HUD 文本
+      ctx.save();
+      ctx.font = '14px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.fillText(`alpha(概念演示): ${alphaForInterpolation.toFixed(2)}`, 18, 22);
+      ctx.fillText(`位置: (${ball.x.toFixed(1)}, ${ball.y.toFixed(1)})`, 18, 42);
+      ctx.fillText(`速度: (${ball.vx.toFixed(1)}, ${ball.vy.toFixed(1)}) px/s`, 18, 62);
+      ctx.restore();
+    }
+
+    function tick(nowTs) {
+      if (!running) return;
+
+      // 计算“这一帧距离上一帧”的真实时间（秒）
+      let frameDt = (nowTs - lastTs) / 1000;
+      lastTs = nowTs;
+
+      // 防止切后台/卡顿造成 dt 巨大：巨大 dt 会让物理一次性跨过边界，出现穿透
+      frameDt = Math.min(frameDt, maxFrameDt);
+
+      if (chkFixed.checked) {
+        accumulator += frameDt;
+
+        // 关键：用 while 循环追赶时间
+        // 如果渲染帧率低于模拟帧率，就会在一帧内多次 step。
+        while (accumulator >= fixedDt) {
+          stepPhysics(fixedDt);
+          accumulator -= fixedDt;
+        }
+
+        // alpha 用于插值渲染（0~1）
+        const alpha = accumulator / fixedDt;
+        render(alpha);
+      } else {
+        // 可变 dt：实现简单，但帧率抖动时物理更不稳定
+        stepPhysics(frameDt);
+        render(1);
+      }
+
+      // FPS 统计
+      fps.frames += 1;
+      const elapsed = nowTs - fps.lastUpdate;
+      if (elapsed >= 500) {
+        fps.value = (fps.frames / elapsed) * 1000;
+        fps.frames = 0;
+        fps.lastUpdate = nowTs;
+      }
+
+      statEl.textContent = `FPS ~ ${fps.value.toFixed(0)} | frameDt=${(frameDt * 1000).toFixed(1)}ms | fixedDt=${(fixedDt * 1000).toFixed(2)}ms`;
+
+      requestAnimationFrame(tick);
+    }
+
+    // --- 交互 ---
+    btnToggle.addEventListener('click', () => {
+      running = !running;
+      btnToggle.textContent = running ? '暂停' : '继续';
+
+      // 从暂停恢复时要重置 lastTs，否则 dt 会非常大
+      if (running) {
+        lastTs = performance.now();
+        requestAnimationFrame(tick);
+      }
+    });
+
+    btnReset.addEventListener('click', () => {
+      reset();
+    });
+
+    // 启动
+    reset();
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leason 1 - Canvas API 基础</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    canvas { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 92%, CanvasText 8%); }
+    code { background: color-mix(in srgb, CanvasText 12%, transparent); padding: 2px 6px; border-radius: 6px; }
+    .tips { max-width: 860px; line-height: 1.65; }
+  </style>
+</head>
+<body>
+  <h1>Leason 1：API 基础（路径 / 文本 / 图片 / 变换 / save-restore）</h1>
+  <p class="tips">
+    本课目标：用一份尽量“写满注释”的代码把 Canvas 2D 的核心对象 <code>CanvasRenderingContext2D</code> 讲清楚。
+    你将看到：路径绘制、文本、图片、变换矩阵、以及 <code>save()</code>/<code>restore()</code> 的状态栈。
+  </p>
+
+  <div class="row">
+    <canvas id="c" width="900" height="520"></canvas>
+    <div class="tips">
+      <h3>你应该重点观察</h3>
+      <ul>
+        <li>画布坐标系：默认原点在左上角，x 向右增大，y 向下增大。</li>
+        <li>路径（Path）：<code>beginPath()</code> 开始新路径；<code>stroke()</code>/<code>fill()</code> 才真正绘制。</li>
+        <li>状态（State）：颜色/线宽/字体/变换/裁剪区等都属于“状态”，可用 <code>save()</code>/<code>restore()</code> 入栈出栈。</li>
+        <li>变换（Transform）：<code>translate/rotate/scale</code> 会影响后续绘制（含 stroke 宽度、文字位置、hitTest 等）。</li>
+      </ul>
+      <p>
+        提示：本课不做 DPR 适配（会在 Leason 3 讲），所以在高分屏上你可能觉得线条略糊。
+      </p>
+    </div>
+  </div>
+
+  <script>
+    /**
+     * Canvas 的“心智模型”
+     * 1) 你拿到 ctx（2D 上下文）后，几乎所有 API 都是在修改 ctx 的状态，或者把“当前路径”变更。
+     * 2) 真正把像素写进画布的动作，通常是：fill()/stroke()/drawImage()/clearRect()/putImageData()。
+     */
+
+    const canvas = document.querySelector('#c');
+    const ctx = canvas.getContext('2d');
+
+    // --- 一些小工具：画坐标轴/网格，帮助理解坐标与变换 ---
+    function drawGrid(step = 50) {
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(128,128,128,0.25)';
+
+      for (let x = 0; x <= canvas.width; x += step) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+
+      for (let y = 0; y <= canvas.height; y += step) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+
+      // 原点标记
+      ctx.fillStyle = 'rgba(255,99,132,0.9)';
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawLabel(text, x, y) {
+      ctx.save();
+      ctx.font = '14px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+      ctx.lineWidth = 4;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(text, x, y);
+      ctx.fillText(text, x, y);
+      ctx.restore();
+    }
+
+    // --- 1) 路径（Path）基础：线段、矩形、圆弧、贝塞尔曲线 ---
+    function demoPathBasics() {
+      // 清空画布：clearRect 会把指定区域变为透明（不是填充白色）。
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      drawGrid(50);
+
+      // 线段：moveTo/lineTo
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(80, 80);
+      ctx.lineTo(260, 130);
+      ctx.lineTo(130, 210);
+      ctx.closePath(); // 关闭路径：自动连回起点
+
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = '#60a5fa';
+      ctx.fillStyle = 'rgba(96,165,250,0.18)';
+      ctx.fill();  // 先 fill 再 stroke 更常见：避免 stroke 覆盖填充边缘观感
+      ctx.stroke();
+      drawLabel('Path: moveTo/lineTo/closePath + fill/stroke', 70, 60);
+      ctx.restore();
+
+      // 矩形：rect / fillRect / strokeRect
+      ctx.save();
+      ctx.fillStyle = 'rgba(52, 211, 153, 0.18)';
+      ctx.strokeStyle = '#34d399';
+      ctx.lineWidth = 4;
+
+      // rect 会把矩形加入“当前路径”，因此需要 beginPath
+      ctx.beginPath();
+      ctx.rect(330, 60, 220, 140);
+      ctx.fill();
+      ctx.stroke();
+
+      // fillRect/strokeRect 是“立即绘制”的便捷方法，不走路径。
+      ctx.fillStyle = 'rgba(244, 114, 182, 0.18)';
+      ctx.strokeStyle = '#f472b6';
+      ctx.fillRect(580, 60, 220, 140);
+      ctx.strokeRect(580, 60, 220, 140);
+      drawLabel('Rect: rect() vs fillRect()/strokeRect()', 320, 40);
+      ctx.restore();
+
+      // 圆弧：arc
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(170, 360, 70, 0, Math.PI * 1.5); // 0 到 270°
+      ctx.strokeStyle = '#eab308';
+      ctx.lineWidth = 10;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      drawLabel('Arc: arc(x,y,r,start,end)', 90, 265);
+      ctx.restore();
+
+      // 贝塞尔曲线：quadraticCurveTo / bezierCurveTo
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(330, 310);
+      // 二次贝塞尔：一个控制点
+      ctx.quadraticCurveTo(440, 220, 550, 310);
+      // 三次贝塞尔：两个控制点
+      ctx.bezierCurveTo(610, 360, 680, 460, 800, 360);
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      drawLabel('Curves: quadraticCurveTo / bezierCurveTo', 320, 280);
+      ctx.restore();
+    }
+
+    // --- 2) 文本：font / textAlign / textBaseline / measureText ---
+    function demoText() {
+      ctx.save();
+
+      // 字体语法与 CSS 类似："font-style font-variant font-weight font-size/line-height font-family"
+      ctx.font = '700 32px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic'; // 默认基线
+      const text = 'Hello Canvas 文本';
+      ctx.fillText(text, 80, 470);
+
+      // measureText 可以测量宽度；还可拿到 ascent/descent（不同浏览器支持略有差异）
+      const metrics = ctx.measureText(text);
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 2;
+      // 用一条线表示文字宽度
+      ctx.beginPath();
+      ctx.moveTo(80, 475);
+      ctx.lineTo(80 + metrics.width, 475);
+      ctx.stroke();
+
+      drawLabel('Text: font/textAlign/textBaseline + measureText()', 80, 430);
+      ctx.restore();
+    }
+
+    // --- 3) 图片：Image 对象加载 + drawImage 三种重载 ---
+    async function demoImage() {
+      // 重要：不要指望 file:// 打开就能稳定加载资源。
+      // 最佳实践：用本地静态服务器启动（README 里会给命令）。
+
+      const img = new Image();
+
+      // 这里加载同源本地资源（不会触发跨域污染/tainted canvas）。
+      img.src = '../assets/canvas-logo.svg';
+
+      // decode() 更像现代 Promise API；老浏览器可用 onload。
+      await img.decode();
+
+      ctx.save();
+      drawLabel('Image: drawImage(img, dx, dy, dw, dh)', 580, 230);
+
+      // drawImage(img, dx, dy)
+      ctx.globalAlpha = 0.95;
+      ctx.drawImage(img, 600, 250);
+
+      // drawImage(img, dx, dy, dw, dh) 进行缩放
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(img, 760, 250, 120, 80);
+
+      // drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh) 进行裁剪 + 缩放
+      // 对 SVG 来说裁剪的视觉效果不明显，这里只是演示 API 形态。
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(img, 0, 0, 120, 80, 600, 360, 180, 120);
+
+      ctx.restore();
+    }
+
+    // --- 4) 变换（Transform）+ save/restore：局部坐标系的建立 ---
+    function demoTransformAndStateStack() {
+      // Canvas 的变换本质上是在维护一个“当前变换矩阵”（CTM）。
+      // 之后你画的所有点，都会先乘上这个矩阵，才映射到画布像素坐标。
+
+      ctx.save();
+
+      // 先把坐标系挪到某个“物体中心”，再旋转/缩放，通常更符合直觉。
+      ctx.translate(460, 360);
+      ctx.rotate(Math.PI / 9);
+      ctx.scale(1.1, 1.1);
+
+      // save/restore 的意义：把“局部坐标系”包起来，用完恢复。
+      // 这让你可以像写 UI/游戏那样：每个对象 draw() 自己管理自己的 transform。
+      ctx.save();
+      ctx.fillStyle = 'rgba(96,165,250,0.18)';
+      ctx.strokeStyle = '#60a5fa';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.roundRect(-120, -60, 240, 120, 18);
+      ctx.fill();
+      ctx.stroke();
+      drawLabel('save/restore + translate/rotate/scale', -118, -76);
+      ctx.restore();
+
+      // 再画一个局部坐标系原点标记
+      ctx.save();
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(0, 0, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // 恢复到进入函数前的状态（包括变换矩阵）
+      ctx.restore();
+    }
+
+    // ---- 主流程：按顺序演示 ----
+    (async function main() {
+      demoPathBasics();
+      demoText();
+      demoTransformAndStateStack();
+      await demoImage();
+
+      // 小提示：如果你想看“路径是怎么逐步构建的”，可以把上面的 demo 分开执行。
+      // 例如：先只调用 demoPathBasics()，然后再加上 demoText()，依次观察变化。
+    })();
+  </script>
+</body>
+</html>

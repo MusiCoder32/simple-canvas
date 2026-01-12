@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leason 5 - Tainted Canvas 跨域污染</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; line-height: 1.7; }
+    canvas { width: 920px; max-width: 100%; height: 420px; border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: 12px; background: color-mix(in srgb, Canvas 92%, CanvasText 8%); display: block; }
+    .bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin: 12px 0 12px; }
+    button { padding: 8px 12px; border-radius: 10px; border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); background: color-mix(in srgb, Canvas 95%, CanvasText 5%); color: CanvasText; cursor: pointer; }
+    .log { white-space: pre-wrap; background: color-mix(in srgb, CanvasText 10%, transparent); padding: 10px 12px; border-radius: 12px; max-width: 920px; }
+    code { background: color-mix(in srgb, CanvasText 12%, transparent); padding: 2px 6px; border-radius: 6px; }
+    .warn { opacity: 0.95; }
+  </style>
+</head>
+<body>
+  <h1>Leason 5：Tainted Canvas（跨域污染）</h1>
+  <p class="warn">
+    这是 Canvas 最容易踩坑的一块：当你把“没有正确 CORS 授权的跨域资源”画进画布后，画布会变成 <b>tainted</b>。
+    一旦 tainted，你就不能再读取像素：<code>toDataURL()</code> / <code>getImageData()</code> 会抛安全异常。
+  </p>
+
+  <div class="bar">
+    <button id="btn-local">绘制同源图片（安全）</button>
+    <button id="btn-remote-nocors">绘制跨域图片（可能污染）</button>
+    <button id="btn-remote-cors">绘制跨域图片（尝试 CORS）</button>
+    <button id="btn-export">导出 toDataURL()</button>
+    <button id="btn-pixels">读取 getImageData()</button>
+    <button id="btn-clear">清空</button>
+  </div>
+
+  <canvas id="c"></canvas>
+  <h3>日志</h3>
+  <div id="log" class="log"></div>
+
+  <script>
+    const canvas = document.querySelector('#c');
+    const ctx = canvas.getContext('2d');
+    const logEl = document.querySelector('#log');
+
+    const CSS_W = 920;
+    const CSS_H = 420;
+
+    function log(msg) {
+      logEl.textContent += msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function getDpr() {
+      return Math.max(1, window.devicePixelRatio || 1);
+    }
+
+    function setupHiDPICanvas() {
+      const dpr = getDpr();
+      canvas.style.width = CSS_W + 'px';
+      canvas.style.height = CSS_H + 'px';
+      canvas.width = Math.round(CSS_W * dpr);
+      canvas.height = Math.round(CSS_H * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return dpr;
+    }
+
+    function clear() {
+      ctx.clearRect(0, 0, CSS_W, CSS_H);
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.12)';
+      ctx.fillRect(0, 0, CSS_W, CSS_H);
+      ctx.restore();
+
+      ctx.save();
+      ctx.font = '14px ui-sans-serif, system-ui';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText('提示：先绘制图片，再尝试导出/读像素。', 16, 24);
+      ctx.fillText('如果绘制了“无 CORS 授权”的跨域图片，后续读取像素会被禁止。', 16, 46);
+      ctx.restore();
+    }
+
+    async function loadImage(url, { crossOrigin } = {}) {
+      return new Promise((resolve, reject) => {
+        const img = new Image();
+
+        // 关键点：crossOrigin 必须在设置 src 之前赋值，否则不会生效。
+        // - 'anonymous'：不带 cookie；要求服务器返回 Access-Control-Allow-Origin
+        // - 'use-credentials'：带 cookie；要求服务器返回 Access-Control-Allow-Credentials: true 等
+        if (crossOrigin) img.crossOrigin = crossOrigin;
+
+        img.onload = () => resolve(img);
+        img.onerror = (e) => reject(new Error('图片加载失败：' + url));
+        img.src = url;
+      });
+    }
+
+    async function drawImageDemo(url, options) {
+      try {
+        log(`加载图片：${url}`);
+        const img = await loadImage(url, options);
+
+        ctx.save();
+        // 画一个底板，方便观察
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(40, 70, CSS_W - 80, CSS_H - 110);
+
+        // drawImage：把图片画进画布
+        ctx.globalAlpha = 0.95;
+        ctx.drawImage(img, 60, 90, 360, 240);
+
+        // 加一段文字说明
+        ctx.font = '14px ui-sans-serif, system-ui';
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillText('现在尝试 toDataURL()/getImageData() 来验证是否 tainted', 60, 360);
+        ctx.restore();
+
+        log('绘制完成。');
+      } catch (err) {
+        log('错误：' + (err?.message || String(err)));
+      }
+    }
+
+    function exportToDataURL() {
+      try {
+        const url = canvas.toDataURL('image/png');
+        log('toDataURL 成功（长度）：' + url.length);
+        // 为了避免在页面塞一大段 base64，这里只记录长度。
+        // 你也可以把 url 打开：window.open(url)
+      } catch (err) {
+        // 常见：SecurityError: Tainted canvases may not be exported.
+        log('toDataURL 失败：' + err);
+      }
+    }
+
+    function readPixels() {
+      try {
+        const imgData = ctx.getImageData(0, 0, 10, 10);
+        // 只读 10x10 做示例
+        log('getImageData 成功：' + imgData.data.length + ' bytes');
+      } catch (err) {
+        log('getImageData 失败：' + err);
+      }
+    }
+
+    // --- 绑定按钮 ---
+    document.querySelector('#btn-local').addEventListener('click', async () => {
+      // 同源资源：不会 taint（前提：你用 http server 跑，而不是 file://）
+      await drawImageDemo('../assets/canvas-logo.svg');
+    });
+
+    document.querySelector('#btn-remote-nocors').addEventListener('click', async () => {
+      // 这个 URL 可能会因站点策略不同而表现不同（不保证 100% 复现）。
+      // 如果它允许 CORS，那就可能不会 taint；如果不允许，多数浏览器会 taint。
+      const url = 'https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png';
+      await drawImageDemo(url);
+    });
+
+    document.querySelector('#btn-remote-cors').addEventListener('click', async () => {
+      // 尝试带 crossOrigin='anonymous' 加载。
+      // 只有服务器返回了正确的 CORS 响应头（Access-Control-Allow-Origin），才允许“可读像素”。
+      const url = 'https://upload.wikimedia.org/wikipedia/commons/3/3f/Logo_Wikimedia_Community_2021.svg';
+      await drawImageDemo(url, { crossOrigin: 'anonymous' });
+    });
+
+    document.querySelector('#btn-export').addEventListener('click', exportToDataURL);
+    document.querySelector('#btn-pixels').addEventListener('click', readPixels);
+    document.querySelector('#btn-clear').addEventListener('click', () => {
+      log('--- 清空 ---');
+      clear();
+    });
+
+    // --- 启动 ---
+    setupHiDPICanvas();
+    clear();
+    log('说明：如果你看到跨域图片绘制后导出失败，这是浏览器的安全机制。');
+    log('如何避免：同源托管资源 / 正确配置 CORS / 使用后端代理转发 / 或不要读取像素（只展示）。');
+
+    window.addEventListener('resize', () => {
+      setupHiDPICanvas();
+      clear();
+      log('resize：重建画布（注意：会清空像素）。');
+    });
+  </script>
+</body>
+</html>
